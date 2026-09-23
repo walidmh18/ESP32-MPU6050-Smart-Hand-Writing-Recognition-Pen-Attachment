@@ -5,6 +5,7 @@ import math
 import numpy as np
 from bleak import BleakScanner, BleakClient
 
+SERVICE_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 DEVICE_NAME = "SmartPen_ESP32C3"
 
@@ -121,7 +122,7 @@ def notification_handler(sender, data: bytearray):
 
 async def main():
     print(f"Scanning for {DEVICE_NAME}...")
-    device = await BleakScanner.find_device_by_name(DEVICE_NAME)
+    device = await BleakScanner.find_device_by_name(DEVICE_NAME, service_uuids=[SERVICE_UUID])
     
     if not device:
         print("Device not found. Ensure ESP32 is on.")

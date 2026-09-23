@@ -3,6 +3,7 @@ import struct
 import csv
 from bleak import BleakScanner, BleakClient
 
+SERVICE_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 DEVICE_NAME = "SmartPen_ESP32C3"
 
@@ -26,7 +27,7 @@ async def main():
     print(f"Scanning for {DEVICE_NAME}...")
     
     # 1. Automatically scan for the ESP32 by its advertised name
-    device = await BleakScanner.find_device_by_name(DEVICE_NAME)
+    device = await BleakScanner.find_device_by_name(DEVICE_NAME, service_uuids=[SERVICE_UUID])
     
     if device is None:
         print(f"Error: Could not find any BLE device named '{DEVICE_NAME}'.")
