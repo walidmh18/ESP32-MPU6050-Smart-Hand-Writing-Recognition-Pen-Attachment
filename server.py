@@ -33,7 +33,7 @@ DATASET_DIR.mkdir(exist_ok=True)
 BLE_RECONNECT_DELAY = 3          # seconds between reconnect attempts
 SAMPLE_AXES = 6                  # ax, ay, az, gx, gy, gz
 SAMPLE_SIZE_BYTES = 12           # 6 × int16 = 12 bytes per sample
-CAPTURE_TOTAL_SAMPLES = 100      # ESP32 captures exactly 100 samples per button press
+CAPTURE_TOTAL_SAMPLES = 500      # ESP32 captures 500 samples @ 500Hz = 1 second per button press
 BLE_CHUNK_MAX_SAMPLES = 42       # ESP32 sends at most 42 samples per BLE notification
 
 logging.basicConfig(

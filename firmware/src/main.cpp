@@ -14,6 +14,17 @@ MPU6050 mpu;
 #define VCC_PIN 1
 #define BUTTON_PIN 0
 
+// Built-in Blue LED pin
+// On ESP32-C3 SuperMini, the onboard blue LED is connected to GPIO 8 (Active-LOW: LOW = ON, HIGH = OFF)
+#define LED_PIN 8
+#define LED_ON  LOW
+#define LED_OFF HIGH
+
+inline void setLed(bool on) {
+  digitalWrite(LED_PIN, on ? LED_ON : LED_OFF);
+}
+
+
 
 
 int16_t gyro_bias_x = 0;
@@ -44,7 +55,7 @@ void calibrateGyro() {
 
     // Small delay to ensure we are actually getting new samples 
     // (matches your ~100Hz target rate)
-    delay(10); 
+    delay(2);  // 2ms = 500Hz to match the new sample rate
   }
 
   // Calculate the average bias
@@ -72,7 +83,7 @@ struct __attribute__((packed)) ImuSample {
   int16_t gx, gy, gz;
 };
 
-#define CAPTURE_SAMPLES 100
+#define CAPTURE_SAMPLES 500   // 500 samples @ 500Hz = 1 second of data
 #define BLE_CHUNK_SIZE 42
 
 ImuSample recordedSamples[CAPTURE_SAMPLES];
@@ -138,6 +149,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
     }
     void onDisconnect(BLEServer* pServer) {
       deviceConnected = false;
+      setLed(false);
       pServer->startAdvertising(); 
     }
 };
@@ -145,7 +157,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
 void imuSamplingTask(void * parameter) {
   TickType_t xLastWakeTime;
-  const TickType_t xFrequency = pdMS_TO_TICKS(10); // Exactly 10ms = 100Hz
+  const TickType_t xFrequency = pdMS_TO_TICKS(2); // 2ms = 500Hz
   xLastWakeTime = xTaskGetTickCount();
 
   for(;;) {
@@ -166,6 +178,7 @@ void imuSamplingTask(void * parameter) {
       capturedSampleCount++;
 
       if (capturedSampleCount >= CAPTURE_SAMPLES) {
+        setLed(false); // Turn OFF blue LED: Recording finished
         Serial.println("Capture complete. Sending BLE chunks...");
         sendRecordedSamples();
         capturedSampleCount = 0;
@@ -177,10 +190,17 @@ void imuSamplingTask(void * parameter) {
 
 void setup() {
     Wire.begin(4, 3);
+    Wire.setClock(400000);  // 400kHz I2C Fast Mode (required for 500Hz sampling)
     Serial.begin(115200);
     
     Serial.println("Initializing I2C devices...");
     mpu.initialize();
+
+    // Configure MPU6050 for 500Hz output:
+    // DLPF_MODE 3 → Gyro output rate = 1kHz, BW = 42Hz (good noise filtering)
+    // SMPLRT_DIV = 1 → Sample Rate = 1000 / (1+1) = 500Hz
+    mpu.setDLPFMode(3);
+    mpu.setRate(1);
 
     // Verify connection
     if (!mpu.testConnection()) {
@@ -195,6 +215,18 @@ void setup() {
 
     // Initialize the button pin
     pinMode(BUTTON_PIN, INPUT);
+
+    // Initialize the built-in blue LED
+    pinMode(LED_PIN, OUTPUT);
+    setLed(false); // Initially OFF
+
+    // 2 quick blinks at startup to confirm LED works
+    for (int i = 0; i < 2; i++) {
+      setLed(true);
+      delay(80);
+      setLed(false);
+      delay(80);
+    }
 
     calibrateGyro();
 
@@ -223,9 +255,9 @@ BLEDevice::init("SmartPen_ESP32C3");
   xTaskCreatePinnedToCore(
     imuSamplingTask,   
     "IMU_Task",        
-    4096,              // Stack size
+    8192,              // Stack size (increased for 500Hz)
     NULL,              // Task parameters
-    1,                 // Priority
+    2,                 // Priority (raised above default to ensure timing)
     NULL,              // Task handle
     0                  // Core 0
   );
@@ -234,8 +266,12 @@ BLEDevice::init("SmartPen_ESP32C3");
 
 void onButtonPress() {
   if (!recordingActive) {
+    Serial.println("Button pressed — waiting 500ms for hand to settle...");
+    delay(500);  // Let hand stabilize after button press
     capturedSampleCount = 0;
     recordingActive = true;
+    setLed(true);  // Turn ON blue LED: Tells user to start writing now!
+    Serial.println(">>> RECORDING STARTED: Blue LED ON (Start writing!) <<<");
   }
 }
 
