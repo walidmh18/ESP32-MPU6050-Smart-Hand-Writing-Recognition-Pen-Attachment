@@ -16,6 +16,7 @@ import json
 import struct
 import logging
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -43,8 +44,22 @@ logging.basicConfig(
 )
 log = logging.getLogger("smartpen")
 
+# ──────────────────── Machine Learning Predictor ───────
+ML_DIR = Path(__file__).resolve().parent / "ML"
+if str(ML_DIR) not in sys.path:
+    sys.path.append(str(ML_DIR))
+
+try:
+    from inference import SmartPenPredictor
+    PREDICTOR_AVAILABLE = True
+    log.info("SmartPenPredictor module located and ready to load ✓")
+except Exception as _import_err:
+    log.warning("Could not import SmartPenPredictor: %s", _import_err)
+    SmartPenPredictor = None
+    PREDICTOR_AVAILABLE = False
+
 # ──────────────────── FastAPI App ──────────────────────
-app = FastAPI(title="SmartPen Dataset Collector")
+app = FastAPI(title="SmartPen Dataset Collector & Live Predictor")
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,6 +75,7 @@ class RecorderState:
     def __init__(self):
         self.is_recording: bool = False
         self.current_label: str = "A"       # Default to 'A' so it's never UNKNOWN
+        self.mode: str = "COLLECT"          # Operational mode: "COLLECT" or "PREDICT"
         self.buffer: list[tuple[int, ...]] = []
         self.ble_connected: bool = False
         self.is_connecting: bool = False
@@ -73,8 +89,29 @@ class RecorderState:
         # Chunk reassembly state (new chunked protocol)
         self.chunk_buffer: list[tuple[int, ...]] = []  # accumulates samples across BLE chunks
         self.capture_count: int = 0                     # how many captures saved this session
+        self.predictor: any = None
+        self.last_prediction: dict | None = None
 
 state = RecorderState()
+
+
+def get_predictor():
+    """Lazily loads SmartPenPredictor into memory once upon first use."""
+    if not PREDICTOR_AVAILABLE or SmartPenPredictor is None:
+        return None
+    if state.predictor is None:
+        try:
+            log.info("Loading SmartPen ML Predictor into memory...")
+            model_ckpt = ML_DIR / "checkpoints" / "best_model.pth"
+            datasets_path = Path("./datasets").resolve()
+            state.predictor = SmartPenPredictor(
+                model_path=str(model_ckpt),
+                datasets_dir=str(datasets_path),
+            )
+            log.info("SmartPen ML Predictor initialized successfully ✓")
+        except Exception as exc:
+            log.error("Failed to initialize SmartPenPredictor: %s", exc)
+    return state.predictor
 
 # ──────────────────── Helpers ──────────────────────────
 
@@ -177,33 +214,85 @@ def on_ble_notification(_sender, data: bytearray) -> None:
         state.chunk_buffer.clear()
         state.capture_count += 1
 
-        # Auto-save using the current label (default 'A' if not set)
-        label = (state.current_label or "A").strip()
-        filepath, rel_path, filename, file_id, total_for_letter = save_buffer_to_csv(label, complete_capture)
-        log.info("✅ Capture #%d complete — saved %s (%d samples)",
-                 file_id, rel_path, len(complete_capture))
+        if state.mode == "PREDICT":
+            predictor = get_predictor()
+            if predictor is not None:
+                try:
+                    import numpy as np
+                    raw_arr = np.array(complete_capture, dtype=np.float32)
+                    pred_res = predictor.predict(raw_arr)
+                    pred_label = pred_res.get("prediction", "?")
+                    confidence = pred_res.get("confidence", 0.0)
+                    probabilities = pred_res.get("probabilities", {})
 
-        # Also copy into recording buffer for the frontend
-        if state.is_recording:
-            state.buffer.extend(complete_capture)
-            state.recording_sample_count += len(complete_capture)
+                    pred_data = {
+                        "prediction": pred_label,
+                        "confidence": confidence,
+                        "probabilities": probabilities,
+                        "samples": len(complete_capture),
+                        "capture_number": state.capture_count,
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                        "message": f"Recognized '{pred_label}' with {confidence * 100:.1f}% confidence!",
+                    }
+                    state.last_prediction = pred_data
+                    state.is_recording = False
+                    log.info("🔮 Model Prediction: '%s' (Confidence: %.2f%%)", pred_label, confidence * 100)
 
-        # Notify the frontend
-        asyncio.get_event_loop().call_soon_threadsafe(
-            asyncio.create_task,
-            ws_send({
-                "status": "SAVED",
-                "filename": filename,
-                "rel_path": rel_path,
-                "folder": filepath.parent.name,
-                "id": file_id,
-                "total_for_letter": total_for_letter,
-                "samples": len(complete_capture),
-                "label": label,
-                "capture_number": state.capture_count,
-                "message": f"Capture #{file_id} for '{label}' saved: {rel_path}",
-            })
-        )
+                    # Send to frontend
+                    asyncio.get_event_loop().call_soon_threadsafe(
+                        asyncio.create_task,
+                        ws_send({
+                            "status": "PREDICTION_RESULT",
+                            **pred_data,
+                        })
+                    )
+                except Exception as pred_err:
+                    log.error("Prediction error during capture: %s", pred_err)
+                    asyncio.get_event_loop().call_soon_threadsafe(
+                        asyncio.create_task,
+                        ws_send({
+                            "status": "ERROR",
+                            "message": f"Prediction failed: {str(pred_err)}",
+                        })
+                    )
+            else:
+                log.warning("Prediction requested but model predictor is unavailable.")
+                asyncio.get_event_loop().call_soon_threadsafe(
+                    asyncio.create_task,
+                    ws_send({
+                        "status": "ERROR",
+                        "message": "ML Model is not loaded or best_model.pth is missing.",
+                    })
+                )
+        else:
+            # Data Collection Mode: auto-save using the current label (default 'A' if not set)
+            label = (state.current_label or "A").strip()
+            filepath, rel_path, filename, file_id, total_for_letter = save_buffer_to_csv(label, complete_capture)
+            log.info("✅ Capture #%d complete — saved %s (%d samples)",
+                     file_id, rel_path, len(complete_capture))
+
+            # Also copy into recording buffer for the frontend
+            if state.is_recording:
+                state.buffer.extend(complete_capture)
+                state.recording_sample_count += len(complete_capture)
+                state.is_recording = False
+
+            # Notify the frontend
+            asyncio.get_event_loop().call_soon_threadsafe(
+                asyncio.create_task,
+                ws_send({
+                    "status": "SAVED",
+                    "filename": filename,
+                    "rel_path": rel_path,
+                    "folder": filepath.parent.name,
+                    "id": file_id,
+                    "total_for_letter": total_for_letter,
+                    "samples": len(complete_capture),
+                    "label": label,
+                    "capture_number": state.capture_count,
+                    "message": f"Capture #{file_id} for '{label}' saved: {rel_path}",
+                })
+            )
 
 
 async def connect_ble(target: str = DEVICE_NAME) -> None:
@@ -418,6 +507,9 @@ async def websocket_endpoint(ws: WebSocket):
         "next_id": next_id,
         "next_file": rel_path,
         "total_for_letter": count,
+        "mode": state.mode,
+        "predictor_ready": PREDICTOR_AVAILABLE,
+        "last_prediction": state.last_prediction,
     }
     if state.ble_connected:
         welcome_payload["status"] = "BLE_CONNECTED"
@@ -442,8 +534,30 @@ async def websocket_endpoint(ws: WebSocket):
 
             command = msg.get("command", "").upper()
 
+            # ── SET_MODE (toggle between COLLECT and PREDICT) ──
+            if command == "SET_MODE":
+                new_mode = msg.get("mode", "COLLECT").upper()
+                if new_mode not in ("COLLECT", "PREDICT"):
+                    new_mode = "COLLECT"
+                state.mode = new_mode
+                state.is_recording = False
+                state.buffer.clear()
+                state.chunk_buffer.clear()
+                state.recording_sample_count = 0
+
+                log.info("Mode changed to: %s", state.mode)
+                if state.mode == "PREDICT":
+                    # Pre-warm model in background
+                    asyncio.get_event_loop().run_in_executor(None, get_predictor)
+
+                await ws.send_json({
+                    "status": "MODE_UPDATED",
+                    "mode": state.mode,
+                    "message": f"Mode switched to {'Live Prediction' if state.mode == 'PREDICT' else 'Data Collection'}.",
+                })
+
             # ── CONNECT BLE manually ─────────────────────
-            if command == "CONNECT_BLE":
+            elif command == "CONNECT_BLE":
                 target = msg.get("target") or msg.get("device_name") or DEVICE_NAME
                 if state.connection_task and not state.connection_task.done():
                     state.connection_task.cancel()
@@ -478,37 +592,50 @@ async def websocket_endpoint(ws: WebSocket):
                     "message": f"Active letter: '{clean_label}' (Folder: datasets/{clean_label}/, Next: {filename})",
                 })
 
-            # ── START recording (arm for capture) ────────
+            # ── START recording / capture arming ─────────
             elif command == "START":
-                raw_label = msg.get("label", state.current_label or "A").strip() or "A"
-                if len(raw_label) == 1 and raw_label.isalpha():
-                    clean_label = raw_label.upper()
-                else:
-                    clean_label = re.sub(r'[^\w\-]', '_', raw_label) or "A"
-                state.current_label = clean_label
                 state.buffer.clear()
                 state.chunk_buffer.clear()
                 state.recording_sample_count = 0
                 state.is_recording = True
-                filepath, rel_path, filename, next_id, count = get_next_dataset_info(clean_label)
 
-                log.info("▶ Armed for capture [letter=%s] (next: %s)", clean_label, rel_path)
-                await ws.send_json({
-                    "status": "RECORDING",
-                    "label": clean_label,
-                    "folder": filepath.parent.name,
-                    "next_id": next_id,
-                    "next_file": rel_path,
-                    "samples": 0,
-                    "message": f"Armed for '{clean_label}' (will save to {rel_path}). Press the pen button to capture.",
-                })
+                if state.mode == "PREDICT":
+                    # Pre-warm predictor
+                    get_predictor()
+                    log.info("▶ Armed for Live Prediction capture")
+                    await ws.send_json({
+                        "status": "RECORDING",
+                        "mode": "PREDICT",
+                        "samples": 0,
+                        "message": "Armed for prediction stroke! Draw in the air and press the pen button.",
+                    })
+                else:
+                    raw_label = msg.get("label", state.current_label or "A").strip() or "A"
+                    if len(raw_label) == 1 and raw_label.isalpha():
+                        clean_label = raw_label.upper()
+                    else:
+                        clean_label = re.sub(r'[^\w\-]', '_', raw_label) or "A"
+                    state.current_label = clean_label
+                    filepath, rel_path, filename, next_id, count = get_next_dataset_info(clean_label)
+
+                    log.info("▶ Armed for capture [letter=%s] (next: %s)", clean_label, rel_path)
+                    await ws.send_json({
+                        "status": "RECORDING",
+                        "mode": "COLLECT",
+                        "label": clean_label,
+                        "folder": filepath.parent.name,
+                        "next_id": next_id,
+                        "next_file": rel_path,
+                        "samples": 0,
+                        "message": f"Armed for '{clean_label}' (will save to {rel_path}). Press the pen button to capture.",
+                    })
 
             # ── STOP recording (disarm) ──────────────────
             elif command == "STOP":
                 state.is_recording = False
                 sample_count = len(state.buffer)
 
-                if sample_count > 0:
+                if sample_count > 0 and state.mode != "PREDICT":
                     await ws.send_json({
                         "status": "SAVED",
                         "samples": sample_count,
@@ -518,7 +645,7 @@ async def websocket_endpoint(ws: WebSocket):
                 else:
                     await ws.send_json({
                         "status": "EMPTY",
-                        "message": "Disarmed. No captures were made.",
+                        "message": "Disarmed. Waiting for capture command.",
                     })
 
                 state.buffer.clear()
@@ -526,11 +653,81 @@ async def websocket_endpoint(ws: WebSocket):
                 state.recording_sample_count = 0
                 log.info("■ Disarmed  [samples=%d]", sample_count)
 
+            # ── TEST_PREDICTION (run inference on existing dataset sample) ──
+            elif command == "TEST_PREDICTION":
+                target_class = str(msg.get("class", "")).strip()
+                predictor = get_predictor()
+                if predictor is None:
+                    await ws.send_json({
+                        "status": "ERROR",
+                        "message": "SmartPenPredictor could not be loaded. Please ensure best_model.pth exists in ML/checkpoints/.",
+                    })
+                else:
+                    try:
+                        import numpy as np
+                        import pandas as pd
+
+                        found_csv = None
+                        if target_class:
+                            class_dir = DATASET_DIR / target_class
+                            if class_dir.exists():
+                                files = sorted(class_dir.glob("dataset_*.csv"))
+                                if files:
+                                    found_csv = files[0]
+
+                        if not found_csv:
+                            # Pick first available csv from any folder
+                            for d in sorted(DATASET_DIR.iterdir()):
+                                if d.is_dir():
+                                    files = sorted(d.glob("dataset_*.csv"))
+                                    if files:
+                                        found_csv = files[0]
+                                        break
+
+                        if found_csv:
+                            df = pd.read_csv(found_csv)
+                            raw_arr = df[["ax", "ay", "az", "gx", "gy", "gz"]].to_numpy(dtype=np.float32)
+                            pred_res = predictor.predict(raw_arr)
+                            pred_label = pred_res.get("prediction", "?")
+                            confidence = pred_res.get("confidence", 0.0)
+                            probabilities = pred_res.get("probabilities", {})
+
+                            state.capture_count += 1
+                            pred_data = {
+                                "prediction": pred_label,
+                                "confidence": confidence,
+                                "probabilities": probabilities,
+                                "samples": len(raw_arr),
+                                "capture_number": state.capture_count,
+                                "timestamp": datetime.now().strftime("%H:%M:%S"),
+                                "source_file": f"{found_csv.parent.name}/{found_csv.name}",
+                                "message": f"Test Sample ({found_csv.name}): Recognized '{pred_label}' with {confidence * 100:.1f}% confidence!",
+                            }
+                            state.last_prediction = pred_data
+                            log.info("🧪 Test Prediction on %s: %s (%.2f%%)", found_csv.name, pred_label, confidence * 100)
+                            await ws.send_json({
+                                "status": "PREDICTION_RESULT",
+                                **pred_data,
+                            })
+                        else:
+                            await ws.send_json({
+                                "status": "ERROR",
+                                "message": "No sample dataset CSV files found in datasets directory.",
+                            })
+                    except Exception as t_err:
+                        log.error("Test prediction error: %s", t_err)
+                        await ws.send_json({
+                            "status": "ERROR",
+                            "message": f"Test prediction error: {str(t_err)}",
+                        })
+
             # ── PING (keep-alive / health-check) ────────
             elif command == "PING":
                 filepath, rel_path, filename, next_id, count = get_next_dataset_info(state.current_label)
                 await ws.send_json({
                     "status": "PONG",
+                    "mode": state.mode,
+                    "predictor_ready": PREDICTOR_AVAILABLE,
                     "ble_connected": state.ble_connected,
                     "is_recording": state.is_recording,
                     "total_samples": state.sample_count,
