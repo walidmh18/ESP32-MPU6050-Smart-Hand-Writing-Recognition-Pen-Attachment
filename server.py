@@ -74,7 +74,7 @@ class RecorderState:
 
     def __init__(self):
         self.is_recording: bool = False
-        self.current_label: str = "A"       # Default to 'A' so it's never UNKNOWN
+        self.current_label: str = "0"       # Default to '0'
         self.mode: str = "COLLECT"          # Operational mode: "COLLECT" or "PREDICT"
         self.buffer: list[tuple[int, ...]] = []
         self.ble_connected: bool = False
@@ -554,6 +554,16 @@ async def websocket_endpoint(ws: WebSocket):
                     "status": "MODE_UPDATED",
                     "mode": state.mode,
                     "message": f"Mode switched to {'Live Prediction' if state.mode == 'PREDICT' else 'Data Collection'}.",
+                })
+
+            # ── RELOAD_MODEL (refresh weights & scaler) ──
+            elif command == "RELOAD_MODEL":
+                state.predictor = None
+                log.info("Model reload requested: clearing cached predictor...")
+                get_predictor()
+                await ws.send_json({
+                    "status": "MODEL_RELOADED",
+                    "message": "Neural network model and scaler reloaded successfully with new weights.",
                 })
 
             # ── CONNECT BLE manually ─────────────────────

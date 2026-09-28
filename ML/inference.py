@@ -27,7 +27,8 @@ from model import SmartPenModel
 
 # ──────────────────────── Constants ────────────────────────
 
-NUM_CLASSES: int = 2
+NUM_CLASSES: int = 10
+CONFIDENCE_THRESHOLD: float = 0.60  # Reject predictions below this confidence as "UNKNOWN"
 _CURRENT_DIR = Path(__file__).resolve().parent
 DEFAULT_MODEL_PATH: str = str(_CURRENT_DIR / "checkpoints" / "best_model.pth")
 DEFAULT_DATASETS_DIR: str = str(_CURRENT_DIR.parent / "datasets" if (_CURRENT_DIR.parent / "datasets").exists() else _CURRENT_DIR / ".." / "datasets")
@@ -37,8 +38,8 @@ DATASETS_DIR: str = DEFAULT_DATASETS_DIR
 
 # Reverse label map: integer index → human-readable class name
 REVERSE_LABEL_MAP: dict[int, str] = {
-    0: "0",
-    1: "1",
+    0: "0", 1: "1", 2: "2", 3: "3", 4: "4",
+    5: "5", 6: "6", 7: "7", 8: "8", 9: "9",
 }
 
 log = logging.getLogger(__name__)
@@ -204,10 +205,22 @@ class SmartPenPredictor:
             for idx, p in enumerate(probs_raw)
         }
 
+        # ── Confidence threshold rejection ──
+        # If the model isn't confident enough, reject as "UNKNOWN"
+        # instead of randomly guessing a class.
+        is_rejected = confidence < CONFIDENCE_THRESHOLD
+        if is_rejected:
+            log.info(
+                f"Prediction rejected: best class '{predicted_label}' "
+                f"with {confidence:.2%} confidence < {CONFIDENCE_THRESHOLD:.0%} threshold"
+            )
+            predicted_label = "UNKNOWN"
+
         return {
             "prediction": predicted_label,
             "confidence": confidence,
             "probabilities": class_probs,
+            "rejected": is_rejected,
         }
 
 

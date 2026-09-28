@@ -32,7 +32,7 @@ from model import SmartPenModel
 BATCH_SIZE: int = 16
 EPOCHS: int = 50
 LEARNING_RATE: float = 0.001
-NUM_CLASSES: int = 2
+NUM_CLASSES: int = 10
 VAL_SPLIT: float = 0.2
 
 DATASETS_DIR: str = "../datasets"
@@ -158,11 +158,14 @@ def main() -> None:
         batch_size=BATCH_SIZE,
         val_split=VAL_SPLIT,
     )
+    dataset_ref = train_loader.dataset.dataset  # type: ignore[attr-defined]
+    num_classes = len(dataset_ref.label_map)
+    print(f"  Detected classes: {num_classes} -> {dataset_ref.label_map}")
     print(f"\n  Train batches: {len(train_loader)}")
     print(f"  Val batches:   {len(val_loader)}")
 
     # ── Model, Loss, Optimizer ──
-    model = SmartPenModel(num_classes=NUM_CLASSES).to(device)
+    model = SmartPenModel(num_classes=num_classes).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
