@@ -1,9 +1,9 @@
-# 🖊️ ESP32 SmartPen — Air-Writing Recognition System
+# 🖊️ ESP32 SmartPen — Handwriting Recognition System
 
 ## Complete Project Recap
 
 > **An end-to-end IoT + Machine Learning system that recognizes handwritten characters
-> drawn in the air using a 6-axis IMU sensor mounted on a pen, classified by a 1D-CNN + LSTM
+> written on paper using a 6-axis IMU sensor mounted on a pen, classified by a 1D-CNN + LSTM
 > hybrid neural network, and displayed in real time on a web dashboard.**
 
 ---
@@ -27,7 +27,7 @@
 ## 1. Project Overview
 
 ### What It Does
-The SmartPen system lets a user **draw characters in the air** by moving a pen equipped with
+The SmartPen system lets a user **write characters on paper** by moving a pen equipped with
 an MPU6050 inertial measurement unit (IMU). The pen captures 1 second of motion data at 500 Hz
 (producing a 500 × 6 matrix of accelerometer + gyroscope readings), transmits it wirelessly
 over Bluetooth Low Energy (BLE) to a Python backend, and a trained neural network classifies
@@ -118,7 +118,7 @@ recordedSamples[i].gz = raw_gz - gyro_bias_z;
 ### Capture Flow (Button Press → BLE Transmission)
 1. User presses the button → `onButtonPress()` is called
 2. A **500 ms delay** lets the user's hand stabilize after the button press
-3. The **blue LED turns ON** — this tells the user to start drawing
+3. The **blue LED turns ON** — this tells the user to start writing
 4. A FreeRTOS task (`imuSamplingTask`) on Core 0 reads the IMU at 500 Hz
 5. After **500 samples** (exactly 1 second), the LED turns OFF
 6. The 500 samples are sent over BLE in chunks of **42 samples** each (504 bytes per chunk)
@@ -447,14 +447,14 @@ The frontend maintains a persistent WebSocket connection to `ws://localhost:8000
 
 ## 9. Full Data Flow — Button Press to Prediction
 
-Here is the complete journey of a single air-writing gesture through the entire system:
+Here is the complete journey of a single handwriting stroke through the entire system:
 
 ```
 STEP 1: HARDWARE CAPTURE
 ─────────────────────────
 User presses button on pen
   → 500ms stabilization delay
-  → Blue LED ON (start drawing!)
+  → Blue LED ON (start writing!)
   → MPU6050 samples at 500 Hz for 1 second
   → 500 samples captured: each is [ax, ay, az, gx, gy, gz] as int16
   → Blue LED OFF (done!)
@@ -519,6 +519,8 @@ stage cdta/
 │   ├── predict.py                     # CLI: single-file prediction
 │   ├── test_model.py                  # Full dataset accuracy test
 │   ├── verify_data_quality.py         # Dataset QA checks
+│   ├── export_onnx.py                 # Export model to ONNX format
+│   ├── convert_ov.py                  # OpenVINO conversion script
 │   └── checkpoints/
 │       └── best_model.pth             # Trained model weights
 │
